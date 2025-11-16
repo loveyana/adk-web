@@ -18,11 +18,16 @@
 import {NgModule} from '@angular/core';
 import {RouterModule, Routes} from '@angular/router';
 import {AppComponent} from './app.component';
+import {AuthSuccessComponent} from './components/auth-success/auth-success.component';
 
 const routes: Routes = [
   {
     path: '',
     component: AppComponent,
+  },
+  {
+    path: 'auth/success',
+    component: AuthSuccessComponent,
   }
 ];
 

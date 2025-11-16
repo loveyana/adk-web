@@ -206,6 +206,8 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
   longRunningEvents: any[] = [];
   functionCallEventId = '';
   redirectUri = URLUtil.getBaseUrlWithoutPath();
+  private isReplayingHistory: boolean = false;
+  private oauthCheckInterval: any = null;  // Timer for checking OAuth popup
   showSidePanel = true;
   showBuilderAssistant = true;
   useSse = false;
@@ -314,16 +316,10 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
       this.openSnackBar(error, 'OK');
     });
 
-    // OAuth HACK: Opens oauth poup in a new window. If the oauth callback
-    // is successful, the new window acquires the auth token, state and
-    // optionally the scope. Send this back to the main window.
+    // OAuth simplified flow: If this window is an OAuth popup and URL contains /auth/success
+    // close the window (the main window is monitoring this popup)
     const location = new URL(window.location.href);
-    const searchParams = location.searchParams;
-    if (searchParams.has('code')) {
-      const authResponseUrl = window.location.href;
-      // Send token to the main window
-      window.opener?.postMessage({authResponseUrl}, window.origin);
-      // Close the popup
+    if (window.opener && location.pathname.includes('/auth/success')) {
       window.close();
     }
 
@@ -668,6 +664,9 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
     try {
       const url = new URL(urlString);
       const searchParams = url.searchParams;
+      if (searchParams.has('redirect_uri')) {
+        return urlString;
+      }
       searchParams.set('redirect_uri', newRedirectUri);
       return url.toString();
     } catch (error) {
@@ -690,24 +689,21 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
       if (func.args.authConfig &&
           func.args.authConfig.exchangedAuthCredential &&
           func.args.authConfig.exchangedAuthCredential.oauth2) {
-        // for OAuth
-        const authUri =
-            func.args.authConfig.exchangedAuthCredential.oauth2.authUri;
-        const updatedAuthUri = this.updateRedirectUri(
-            authUri,
-            this.redirectUri,
-        );
-        this.openOAuthPopup(updatedAuthUri)
-            .then((authResponseUrl) => {
-              this.functionCallEventId = e.id;
-              this.sendOAuthResponse(func, authResponseUrl, this.redirectUri);
-            })
-            .catch((error) => {
-              console.error('OAuth Error:', error);
-            });
-      } else {
-        this.functionCallEventId = e.id;
+        // for OAuth - simplified flow
+        // Only open popup if not already opened for this session
+        if (!this.isReplayingHistory) {
+          const authUri =
+              func.args.authConfig.exchangedAuthCredential.oauth2.authUri;
+          const updatedAuthUri = this.updateRedirectUri(
+              authUri,
+              this.redirectUri,
+          );
+          // Just open the OAuth popup, agent will monitor the auth status
+          // No need to send function_response back
+          this.openOAuthPopup(updatedAuthUri);
+        }
       }
+      this.functionCallEventId = e.id;
     }
     if (e?.actions && e.actions.artifactDelta) {
       for (const key in e.actions.artifactDelta) {
@@ -888,47 +884,6 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
     this.eventData = new Map(this.eventData);
   }
 
-  private sendOAuthResponse(
-      func: any,
-      authResponseUrl: string,
-      redirectUri: string,
-  ) {
-    this.longRunningEvents.pop();
-    const authResponse: AgentRunRequest = {
-      appName: this.appName,
-      userId: this.userId,
-      sessionId: this.sessionId,
-      newMessage: {
-        role: 'user',
-        parts: [],
-      },
-    };
-
-    var authConfig = structuredClone(func.args.authConfig);
-    authConfig.exchangedAuthCredential.oauth2.authResponseUri = authResponseUrl;
-    authConfig.exchangedAuthCredential.oauth2.redirectUri = redirectUri;
-
-    authResponse.functionCallEventId = this.functionCallEventId;
-    authResponse.newMessage.parts.push({
-      function_response: {
-        id: func.id,
-        name: func.name,
-        response: authConfig,
-      },
-    });
-
-    let response: any[] = [];
-    this.agentService.runSse(authResponse).subscribe({
-      next: async (chunkJson) => {
-        response.push(chunkJson);
-      },
-      error: (err) => console.error('SSE error:', err),
-      complete: () => {
-        this.processRunSseResponse(response);
-      },
-    });
-  }
-
   private processRunSseResponse(response: any) {
     for (const e of response) {
       if (e.content) {
@@ -1079,33 +1034,53 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  private openOAuthPopup(url: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-      // Open OAuth popup
-      const popup = this.safeValuesService.windowOpen(
-          window, url, 'oauthPopup', 'width=600,height=700');
+  private openOAuthPopup(url: string): void {
+    // Open OAuth popup - simplified flow
+    // Agent will monitor the auth status, no need to wait for response
+    const popup = this.safeValuesService.windowOpen(
+        window, url, 'oauthPopup', 'width=600,height=700');
 
-      if (!popup) {
-        reject('Popup blocked!');
-        return;
+    if (!popup) {
+      console.error('Popup blocked!');
+      this.openSnackBar('Popup blocked! Please allow popups for this site.', 'OK');
+      return;
+    }
+
+    // Clear any existing interval
+    if (this.oauthCheckInterval) {
+      clearInterval(this.oauthCheckInterval);
+    }
+
+    // Monitor the popup window
+    this.oauthCheckInterval = setInterval(() => {
+      try {
+        // Check if popup is closed
+        if (popup.closed) {
+          clearInterval(this.oauthCheckInterval);
+          this.oauthCheckInterval = null;
+          console.log('OAuth popup closed');
+          return;
+        }
+
+        // Try to check if URL contains /auth/success
+        // This will throw an error if the popup is on a different origin
+        const popupUrl = popup.location.href;
+        if (popupUrl && popupUrl.includes('/auth/success')) {
+          clearInterval(this.oauthCheckInterval);
+          this.oauthCheckInterval = null;
+          popup.close();
+          console.log('OAuth success detected, popup closed');
+        }
+      } catch (error) {
+        // Cross-origin error is expected when popup navigates to OAuth provider
+        // Just check if popup is closed
+        if (popup.closed) {
+          clearInterval(this.oauthCheckInterval);
+          this.oauthCheckInterval = null;
+          console.log('OAuth popup closed');
+        }
       }
-
-      // Listen for messages from the popup
-      const listener = (event: MessageEvent) => {
-        if (event.origin !== window.location.origin) {
-          return;  // Ignore messages from unknown sources
-        }
-        const {authResponseUrl} = event.data;
-        if (authResponseUrl) {
-          resolve(authResponseUrl);
-          window.removeEventListener('message', listener);
-        } else {
-          console.log('OAuth failed', event);
-        }
-      };
-
-      window.addEventListener('message', listener);
-    });
+    }, 500); // Check every 500ms
   }
 
   toggleSidePanel() {
@@ -1160,6 +1135,8 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
 
     this.resetEventsAndMessages();
 
+    this.isReplayingHistory = true; 
+    
     session.events.forEach((event: any) => {
       event.content?.parts?.forEach((part: any) => {
         this.storeMessage(
@@ -1170,6 +1147,7 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
       });
     });
 
+    this.isReplayingHistory = false;
     this.eventService.getTrace(this.sessionId)
         .pipe(first(), catchError(() => of([])))
         .subscribe(res => {
