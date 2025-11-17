@@ -685,7 +685,8 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
     if (e?.longRunningToolIds && e.longRunningToolIds.length > 0) {
       this.getAsyncFunctionsFromParts(
           e.longRunningToolIds, e.content.parts, e.invocationId);
-      const func = this.longRunningEvents[0].function;
+      // Get the last added function call (the current one) instead of always using [0]
+      const func = this.longRunningEvents[this.longRunningEvents.length - 1].function;
       if (func.args.authConfig &&
           func.args.authConfig.exchangedAuthCredential &&
           func.args.authConfig.exchangedAuthCredential.oauth2) {
