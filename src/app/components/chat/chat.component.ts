@@ -38,6 +38,8 @@ import {NgxJsonViewerModule} from 'ngx-json-viewer';
 import {BehaviorSubject, combineLatest, Observable, of} from 'rxjs';
 import {catchError, distinctUntilChanged, filter, first, map, shareReplay, switchMap, take, tap} from 'rxjs/operators';
 
+import {getUserIdFromSession} from '../../../utils/cookie-util';
+
 import {URLUtil} from '../../../utils/url-util';
 import {AgentRunRequest} from '../../core/models/AgentRunRequest';
 import {EvalCase} from '../../core/models/Eval';
@@ -195,7 +197,7 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
   artifacts: any[] = [];
   userInput: string = '';
   userEditEvalCaseMessage: string = '';
-  userId = 'user';
+  userId = getUserIdFromSession() || 'user';  // Try to get userId from cookie first
   appName = '';
   sessionId = ``;
   evalCase: EvalCase|null = null;
@@ -388,7 +390,11 @@ export class ChatComponent implements OnInit, AfterViewInit, OnDestroy {
       const sessionUrl = queryParams['session'];
       const userUrl = queryParams['userId'];
 
-      if (userUrl) {
+      // Cookie has higher priority than URL query parameter
+      const cookieUserId = getUserIdFromSession();
+      if (cookieUserId) {
+        this.userId = cookieUserId;
+      } else if (userUrl) {
         this.userId = userUrl;
       }
 
